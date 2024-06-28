@@ -12,6 +12,7 @@ backbone = "resnet18"
 device = "homeworkstation"
 img_setting = "shortersize480"
 num_gpus = 1
+learning_rate = (1e-4) / 8  # adjusted in accordance with linear rule
 
 # Commonly changed training configurations
 num_epochs = 12   # train epochs
@@ -23,7 +24,7 @@ starting_epoch = 0
 max_norm = 0.1    # clip gradient norm
 
 # output_dir = None  # path to save checkpoints, default for None: checkpoints/{model_name}
-output_dir = f'outputs/{device}_{img_setting}_{branch}_{version}_salientdetr_{backbone}_bs{batch_size}x{num_gpus}_{num_epochs}ep_{dataset}'
+output_dir = f'outputs/{device}_{img_setting}_{branch}_{version}_salientdetr_{backbone}_bs{batch_size}x{num_gpus}_{num_epochs}ep_{dataset}_lr{learning_rate}'
 
 find_unused_parameters = False  # useful for debugging distributed training
 
@@ -51,7 +52,6 @@ model_path = "configs/salience_detr/salience_detr_resnet18_480_1333.py"
 # checkpoints/salience_detr_resnet50_800_1333/train/2024-03-22-09_38_50/best_ap.pth
 resume_from_checkpoint = None  
 
-learning_rate = 1e-4  # initial learning rate
 optimizer = optim.AdamW(lr=learning_rate, weight_decay=1e-4, betas=(0.9, 0.999))
 lr_scheduler = optim.lr_scheduler.MultiStepLR(milestones=[10], gamma=0.1)
 
