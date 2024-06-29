@@ -30,7 +30,7 @@ find_unused_parameters = False  # useful for debugging distributed training
 
 # define dataset for train
 coco_path = "data/coco"  # /PATH/TO/YOUR/COCODIR
-train_transform = presets.detr  # see transforms/presets to choose a transform
+train_transform = presets.detr_ink  # see transforms/presets to choose a transform
 train_dataset = CocoDetection(
     img_folder=f"{coco_path}/train2017",
     ann_file=f"{coco_path}/annotations/instances_minitrain2017.json",

@@ -42,7 +42,7 @@ lsj_1536 = T.Compose([
     T.SanitizeBoundingBox(labels_getter=lambda x: x[-1]),
 ])
 
-scales = [480]
+scales = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
 
 multiscale = T.Compose([
     T.RandomShortestSize(min_size=scales, max_size=1333, antialias=True),
@@ -52,9 +52,25 @@ multiscale = T.Compose([
     T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
 ])
 
+detr_ink = T.Compose([
+    T.RandomHorizontalFlip(),
+    T.RandomShortestSize(min_size=[480], max_size=1333, antialias=True),
+    T.PILToTensor(),
+    T.ConvertImageDtype(torch.float),
+    T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+    T.SanitizeBoundingBox(labels_getter=lambda x: x[-1]),
+])
+
 detr = T.Compose([
     T.RandomHorizontalFlip(),
-    T.RandomShortestSize(min_size=scales, max_size=1333, antialias=True),
+    T.RandomChoice([
+        T.RandomShortestSize(min_size=scales, max_size=1333, antialias=True),
+        T.Compose([
+            T.RandomShortestSize([400, 500, 600], antialias=True),
+            RandomSizeCrop(384, 600),
+            T.RandomShortestSize(min_size=scales, max_size=1333, antialias=True),
+        ]),
+    ]),
     T.PILToTensor(),
     T.ConvertImageDtype(torch.float),
     T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),

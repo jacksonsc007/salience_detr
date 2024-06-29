@@ -30,7 +30,7 @@ find_unused_parameters = False  # useful for debugging distributed training
 
 # define dataset for train
 coco_path = "data/coco"  # /PATH/TO/YOUR/COCODIR
-train_transform = presets.detr_ink  # see transforms/presets to choose a transform
+train_transform = presets.detr  # see transforms/presets to choose a transform
 train_dataset = CocoDetection(
     img_folder=f"{coco_path}/train2017",
     ann_file=f"{coco_path}/annotations/instances_minitrain2017.json",
@@ -45,7 +45,8 @@ test_dataset = CocoDetection(
 
 # model config to train
 # model_path = "configs/salience_detr/salience_detr_resnet50_800_1333.py"
-model_path = "configs/salience_detr/salience_detr_resnet18_480_1333.py"
+# model_path = "configs/salience_detr/salience_detr_resnet18_480_1333.py"
+model_path = "configs/salience_detr/salience_detr_resnet18_800_1333.py"
 
 # specify a checkpoint folder to resume, or a pretrained ".pth" to finetune, for example:
 # checkpoints/salience_detr_resnet50_800_1333/train/2024-03-22-09_38_50
