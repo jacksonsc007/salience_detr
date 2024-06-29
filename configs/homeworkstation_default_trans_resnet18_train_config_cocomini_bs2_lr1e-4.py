@@ -10,7 +10,7 @@ version = "baseline"
 dataset = "cocomini"
 backbone = "resnet18"
 device = "homeworkstation"
-img_setting = "shortersize480"
+img_setting = "default_trans"
 num_gpus = 1
 learning_rate = (1e-4)
 

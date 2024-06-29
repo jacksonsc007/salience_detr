@@ -83,6 +83,8 @@ def train():
                 datetime.datetime.now().strftime("%Y-%m-%d-%H_%M_%S"),
             )
 
+    if os.path.exists(cfg.output_dir):
+        raise FileExistsError(f"Output directory ({cfg.output_dir}) already exists. Please check your config file and modify output_dir to avoid overwriting existing files.")
     # Initialize accelerator
     project_config = ProjectConfiguration(
         project_dir=cfg.output_dir, total_limit=5, automatic_checkpoint_naming=True

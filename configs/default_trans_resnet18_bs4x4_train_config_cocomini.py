@@ -10,7 +10,7 @@ version = "baseline"
 dataset = "cocomini"
 backbone = "resnet18"
 device = "3090x4"
-img_setting = "shortersize480"
+img_setting = "default_trans"
 num_gpus = 4
 
 # Commonly changed training configurations
