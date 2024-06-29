@@ -5,8 +5,8 @@ from transforms import presets
 from optimizer import param_dict
 
 # version specific output
-branch = "main"
-version = "baseline"
+branch = "exp_baseline"
+version = "v1.0"
 dataset = "cocomini"
 backbone = "resnet18"
 device = "homeworkstation"

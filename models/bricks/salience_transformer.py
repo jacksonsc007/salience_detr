@@ -200,14 +200,16 @@ class SalienceTransformer(TwostageTransformer):
         enc_outputs_coord = enc_outputs_coord.sigmoid()
 
         # get topk output classes and coordinates
-        if torchvision._is_tracing():
-            topk = torch.min(torch.tensor(self.two_stage_num_proposals * 4), enc_outputs_class.shape[1])
-        else:
-            topk = min(self.two_stage_num_proposals * 4, enc_outputs_class.shape[1])
+        # if torchvision._is_tracing():
+        #     topk = torch.min(torch.tensor(self.two_stage_num_proposals * 4), enc_outputs_class.shape[1])
+        # else:
+        #     topk = min(self.two_stage_num_proposals * 4, enc_outputs_class.shape[1])
+        topk = self.two_stage_num_proposals
         topk_scores, topk_index = torch.topk(enc_outputs_class.max(-1)[0], topk, dim=1)
-        topk_index = self.nms_on_topk_index(
-            topk_scores, topk_index, spatial_shapes, level_start_index, iou_threshold=0.3
-        ).unsqueeze(-1)
+        topk_index = topk_index[..., None]
+        # topk_index = self.nms_on_topk_index(
+        #     topk_scores, topk_index, spatial_shapes, level_start_index, iou_threshold=0.3
+        # ).unsqueeze(-1)
         enc_outputs_class = enc_outputs_class.gather(1, topk_index.expand(-1, -1, self.num_classes))
         enc_outputs_coord = enc_outputs_coord.gather(1, topk_index.expand(-1, -1, 4))
 
