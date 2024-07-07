@@ -11,7 +11,7 @@ from models.bricks.basic import MLP
 from models.bricks.ms_deform_attn import MultiScaleDeformableAttention
 from models.bricks.position_encoding import PositionEmbeddingLearned, get_sine_pos_embed
 from util.misc import inverse_sigmoid
-
+from models.bricks.misc import points2box
 
 class MaskPredictor(nn.Module):
     def __init__(self, in_dim, h_dim):
@@ -221,7 +221,7 @@ class SalienceTransformer(TwostageTransformer):
             reference_points = torch.cat([noised_box_query.sigmoid(), reference_points], 1)
 
         # decoder
-        outputs_classes, outputs_coords = self.decoder(
+        outputs_classes, outputs_coords, rep_points_1, rep_points_2, rep_boxes = self.decoder(
             query=target,
             value=memory,
             key_padding_mask=mask_flatten,
@@ -232,7 +232,7 @@ class SalienceTransformer(TwostageTransformer):
             attn_mask=attn_mask,
         )
 
-        return outputs_classes, outputs_coords, enc_outputs_class, enc_outputs_coord, salience_score
+        return outputs_classes, outputs_coords, enc_outputs_class, enc_outputs_coord, salience_score, rep_points_1, rep_points_2, rep_boxes
 
     @staticmethod
     def fast_repeat_interleave(input, repeats):
@@ -511,6 +511,8 @@ class SalienceTransformerDecoderLayer(nn.Module):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = n_heads
+        self.n_levels = n_levels
+        self.n_points = n_points
         # cross attention
         self.cross_attn = MultiScaleDeformableAttention(embed_dim, n_levels, n_heads, n_points)
         self.dropout1 = nn.Dropout(dropout)
@@ -572,13 +574,14 @@ class SalienceTransformerDecoderLayer(nn.Module):
         query = self.norm2(query)
 
         # cross attention
-        query2 = self.cross_attn(
+        query2, rep_points = self.cross_attn(
             query=self.with_pos_embed(query, query_pos),
             reference_points=reference_points,
             value=value,
             spatial_shapes=spatial_shapes,
             level_start_index=level_start_index,
             key_padding_mask=key_padding_mask,
+            return_sampling_location=True
         )
         query = query + self.dropout1(query2)
         query = self.norm1(query)
@@ -586,7 +589,7 @@ class SalienceTransformerDecoderLayer(nn.Module):
         # ffn
         query = self.forward_ffn(query)
 
-        return query
+        return query, rep_points
 
 
 class SalienceTransformerDecoder(nn.Module):
@@ -603,8 +606,13 @@ class SalienceTransformerDecoder(nn.Module):
 
         # iterative bounding box refinement
         self.class_head = nn.ModuleList([nn.Linear(self.embed_dim, num_classes) for _ in range(num_layers)])
-        self.bbox_head = nn.ModuleList([MLP(self.embed_dim, self.embed_dim, 4, 3) for _ in range(num_layers)])
-        self.norm = nn.LayerNorm(self.embed_dim)
+
+        self.num_heads = decoder_layer.num_heads
+        self.n_levels = decoder_layer.n_levels
+        self.n_points = decoder_layer.n_points
+        self.num_reppoints = self.num_heads * self.n_levels * self.n_points * 2
+        self.bbox_head = nn.ModuleList([MLP(self.embed_dim, self.embed_dim, self.num_reppoints, 3) for _ in range(num_layers)])
+        # self.norm = nn.LayerNorm(self.embed_dim)
 
         self.init_weights()
 
@@ -637,6 +645,9 @@ class SalienceTransformerDecoder(nn.Module):
         outputs_classes = []
         outputs_coords = []
         valid_ratio_scale = torch.cat([valid_ratios, valid_ratios], -1)[:, None]
+        rep_points_1 = []
+        rep_points_2 = []
+        rep_boxes = []
 
         for layer_idx, layer in enumerate(self.layers):
             reference_points_input = reference_points.detach()[:, :, None] * valid_ratio_scale
@@ -644,7 +655,7 @@ class SalienceTransformerDecoder(nn.Module):
             query_pos = self.ref_point_head(query_sine_embed)
 
             # relation embedding
-            query = layer(
+            query, rep_point1 = layer(
                 query=query,
                 query_pos=query_pos,
                 reference_points=reference_points_input,
@@ -655,10 +666,29 @@ class SalienceTransformerDecoder(nn.Module):
                 self_attn_mask=attn_mask,
             )
 
+            # restore coordinates to real image size
+            rep_point1 = rep_point1 / valid_ratios[:, None, None, :, None, :]
+            rep_points_1.append(rep_point1)
+            
+            # rep_points: (bs, num_queries, n_heads, n_lvls, n_points, 2)
+            # rep_box: (bs, num_queries, 4)
+            rep_box1 = points2box(rep_point1)
+            rep_boxes.append(rep_box1)
+
+
+            # output_coord = self.bbox_head[layer_idx](query) + inverse_sigmoid(reference_points)
+            # output_coord = output_coord.sigmoid()
+            
+            tmp = self.bbox_head[layer_idx](query)
+            tmp = tmp.reshape_as(rep_point1)
+
+            rep_point2 = tmp * (rep_box1[..., 2:][:, :, None, None, None, :]).detach() + rep_point1.detach()
+            rep_points_2.append(rep_point2)
+            output_coord = points2box(rep_point2)
+
             # get output, reference_points are not detached for look_forward_twice
-            output_class = self.class_head[layer_idx](self.norm(query))
-            output_coord = self.bbox_head[layer_idx](self.norm(query)) + inverse_sigmoid(reference_points)
-            output_coord = output_coord.sigmoid()
+            output_class = self.class_head[layer_idx](query)
+
             outputs_classes.append(output_class)
             outputs_coords.append(output_coord)
 
@@ -666,9 +696,11 @@ class SalienceTransformerDecoder(nn.Module):
                 break
 
             # iterative bounding box refinement
-            reference_points = self.bbox_head[layer_idx](query) + inverse_sigmoid(reference_points.detach())
-            reference_points = reference_points.sigmoid()
+            reference_points = output_coord.detach()
 
         outputs_classes = torch.stack(outputs_classes)
         outputs_coords = torch.stack(outputs_coords)
-        return outputs_classes, outputs_coords
+        rep_points_1 = torch.stack(rep_points_1)
+        rep_points_2 = torch.stack(rep_points_2)
+        rep_boxes = torch.stack(rep_boxes)
+        return outputs_classes, outputs_coords, rep_points_1, rep_points_2, rep_boxes

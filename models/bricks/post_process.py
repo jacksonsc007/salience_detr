@@ -69,7 +69,26 @@ class PostProcess(nn.Module):
         if torchvision._is_tracing():
             # avoid interation warning during ONNX export
             scores, labels, boxes = map(lambda x: x.unbind(0), (scores, labels, boxes))
-        results = [{"scores": s, "labels": l, "boxes": b} for s, l, b in zip(scores, labels, boxes)]
+
+        if 'rep_points_1' in outputs:
+            rep_points_1 = outputs['rep_points_1']
+
+            bs, num_queries, n_heads, n_lvls, n_points, _ = rep_points_1.shape
+            num_reppoints = n_heads * n_lvls * n_points
+
+            rep_points_1 = rep_points_1.reshape(bs, num_queries, -1, 2)
+            rep_points_1 = rep_points_1 * torch.stack([img_w, img_h], dim=1)[:, None, None, :]
+            rep_points_1 = torch.gather(rep_points_1, 1, topk_boxes[:, :, None, None].repeat(1, 1, num_reppoints, 2))
+
+            rep_points_2 = outputs['rep_points_2']
+            rep_points_2 = rep_points_2.reshape(bs, num_queries, -1, 2)
+            rep_points_2 = rep_points_2 * torch.stack([img_w, img_h], dim=1)[:, None, None, :]
+            rep_points_2 = torch.gather(rep_points_2, 1, topk_boxes[:, :, None, None].repeat(1, 1, num_reppoints, 2))
+
+            results = [{"scores": s, "labels": l, "boxes": b, "rep_points_1": r1, "rep_points_2": r2} for s, l, b, r1, r2 in zip(scores, labels, boxes, rep_points_1, rep_points_2)]
+        else:
+            results = [{"scores": s, "labels": l, "boxes": b} for s, l, b in zip(scores, labels, boxes)]
+        
 
         return results
 

@@ -14,7 +14,7 @@ from accelerate.utils import ProjectConfiguration
 from torch.utils import data
 
 from util.collate_fn import collate_fn
-from util.engine import evaluate_acc, train_one_epoch_acc
+from util.engine import evaluate_rep_points, train_one_epoch_acc
 from util.group_by_aspect_ratio import GroupedBatchSampler, create_aspect_ratio_groups
 from util.lazy_load import Config
 from util.misc import default_setup, encode_labels, fixed_generator, seed_worker
@@ -184,7 +184,7 @@ def train():
         # we save model and labels together
         accelerator.save_state(safe_serialization=False)
         logger.info("Start evaluation")
-        coco_evaluator = evaluate_acc(model, test_loader, epoch, accelerator)
+        coco_evaluator = evaluate_rep_points(model, test_loader, epoch, accelerator)
 
         # save best results
         cur_ap, cur_ap50 = coco_evaluator.coco_eval["bbox"].stats[:2]

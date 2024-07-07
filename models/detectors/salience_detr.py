@@ -160,6 +160,38 @@ class SalienceDETR(DNDETRDetector):
         )
         self.focus_criterion = focus_criterion
 
+    @torch.jit.unused
+    def _set_aux_loss(self, outputs_class, outputs_coord, rep_boxes=None):
+        # this is a workaround to make torchscript happy, as torchscript
+        # doesn't support dictionary with non-homogeneous values, such
+        # as a dict having both a Tensor and a list.
+        if rep_boxes is None:
+            return [{'pred_logits': a, 'pred_boxes': b}
+                    for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
+        else:
+            return [{'pred_logits': a, 'pred_boxes': b, 'rep_boxes': c}
+                    for a, b, c in zip(outputs_class[:-1], outputs_coord[:-1], rep_boxes[:-1])]
+
+    def dn_post_process(self, outputs_class, outputs_coord, rep_points_1, rep_points_2, rep_boxes, dn_metas):
+        if dn_metas and "max_gt_num_per_image" in dn_metas:
+            padding_size = dn_metas["max_gt_num_per_image"] * dn_metas["denoising_groups"]
+            output_known_class = outputs_class[:, :, :padding_size, :]
+            output_known_coord = outputs_coord[:, :, :padding_size, :]
+            outputs_class = outputs_class[:, :, padding_size:, :]
+            outputs_coord = outputs_coord[:, :, padding_size:, :]
+            rep_points_1 = rep_points_1[:, :, padding_size:, :]
+            rep_points_2 = rep_points_2[:, :, padding_size:, :]
+            rep_boxes = rep_boxes[:, :, padding_size:, :]
+
+            out = {
+                "pred_logits": output_known_class[-1],
+                "pred_boxes": output_known_coord[-1],
+            }
+            if self.aux_loss:
+                out["aux_outputs"] = self._set_aux_loss(output_known_class, output_known_coord)
+            dn_metas["denoising_output"] = out
+        return outputs_class, outputs_coord, rep_points_1, rep_points_2, rep_boxes
+
     def forward(self, images: List[Tensor], targets: List[Dict] = None):
         # get original image sizes, used for postprocess
         original_image_sizes = self.query_original_sizes(images)
@@ -193,7 +225,7 @@ class SalienceDETR(DNDETRDetector):
             max_gt_num_per_image = None
 
         # feed into transformer
-        outputs_class, outputs_coord, enc_class, enc_coord, foreground_mask = self.transformer(
+        outputs_class, outputs_coord, enc_class, enc_coord, foreground_mask, rep_points_1, rep_points_2, rep_boxes = self.transformer(
             multi_level_feats,
             multi_level_masks,
             multi_level_position_embeddings,
@@ -210,12 +242,12 @@ class SalienceDETR(DNDETRDetector):
                 "denoising_groups": denoising_groups,
                 "max_gt_num_per_image": max_gt_num_per_image,
             }
-            outputs_class, outputs_coord = self.dn_post_process(outputs_class, outputs_coord, dn_metas)
+            outputs_class, outputs_coord, rep_points_1, rep_points_2, rep_boxes = self.dn_post_process(outputs_class, outputs_coord, rep_points_1, rep_points_2, rep_boxes, dn_metas)
 
             # prepare for loss computation
-        output = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord[-1]}
+        output = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord[-1], 'rep_boxes': rep_boxes[-1], 'rep_points_1': rep_points_1[-1], 'rep_points_2': rep_points_2[-1]}
         if self.aux_loss:
-            output["aux_outputs"] = self._set_aux_loss(outputs_class, outputs_coord)
+            output["aux_outputs"] = self._set_aux_loss(outputs_class, outputs_coord, rep_boxes)
 
         # prepare two stage output
         output["enc_outputs"] = {"pred_logits": enc_class, "pred_boxes": enc_coord}
@@ -236,6 +268,16 @@ class SalienceDETR(DNDETRDetector):
 
             # loss reweighting
             weight_dict = self.criterion.weight_dict
+
+            # add weight for rep boxes
+            rep_weight = {'loss_ce_rep': 1, 'loss_bbox_rep': 5, 'loss_giou_rep': 2}
+            for layer_idx in range(self.transformer.decoder.num_layers-1):
+                for k, v in rep_weight.items():
+                    weight_dict.update(
+                        {f'{k}_{layer_idx}': v}
+                    )
+            weight_dict.update(rep_weight)
+
             loss_dict = dict((k, loss_dict[k] * weight_dict[k]) for k in loss_dict.keys() if k in weight_dict)
             return loss_dict
 

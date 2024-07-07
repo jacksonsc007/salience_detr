@@ -103,6 +103,17 @@ class SetCriterion(nn.Module):
             )
         )
         losses["loss_giou"] = loss_giou.sum() / num_boxes
+
+        if 'rep_boxes' in outputs:
+            src_boxes = outputs['rep_boxes'][idx]
+            loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none')
+
+            losses['loss_bbox_rep'] = loss_bbox.sum() / num_boxes
+
+            loss_giou = 1 - torch.diag(box_ops.generalized_box_iou(
+                box_ops._box_cxcywh_to_xyxy(src_boxes),
+                box_ops._box_cxcywh_to_xyxy(target_boxes)))
+            losses['loss_giou_rep'] = loss_giou.sum() / num_boxes
         return losses
 
     def _get_src_permutation_idx(self, indices):

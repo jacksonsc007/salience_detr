@@ -14,6 +14,7 @@ import util.utils as utils
 from util.coco_eval import CocoEvaluator
 from util.coco_utils import get_coco_api_from_dataset
 from util.collate_fn import DataPrefetcher
+from util.visualize import visualize_reppoints_boxes
 
 
 def train_one_epoch_acc(
@@ -97,6 +98,107 @@ def train_one_epoch_acc(
 
 
 @torch.no_grad()
+def evaluate_rep_points(model, data_loader, epoch, accelerator=None):
+    logger = logging.getLogger(os.path.basename(os.getcwd()) + "." + __name__)
+    # evaluation uses single thread
+    model.eval()
+    metric_logger = utils.MetricLogger(delimiter="  ")
+    header = "Test:"
+
+    coco = get_coco_api_from_dataset(data_loader.dataset)
+    coco_evaluator = CocoEvaluator(coco, ["bbox"])
+
+    # for collect detection numbers
+    category_det_nums = [0] * (max(coco.getCatIds()) + 1)
+
+
+    dataset = data_loader.dataset
+    cat_ids = list(range(max(dataset.coco.cats.keys()) + 1))
+    classes = tuple(dataset.coco.cats.get(c, {"name": "none"})["name"] for c in cat_ids)
+
+    for images, targets in metric_logger.log_every(data_loader, 10, header):
+        # get model predictions
+        model_time = time.time()
+        outputs = model(images)
+        # non_blocking=True here causes incorrect performance
+        outputs = [{k: v.to("cpu") for k, v in t.items()} for t in outputs]
+        model_time = time.time() - model_time
+
+        # perform evaluation through COCO API
+        res = {target["image_id"]: output for target, output in zip(targets, outputs)}
+        evaluator_time = time.time()
+        coco_evaluator.update(res)
+        evaluator_time = time.time() - evaluator_time
+        metric_logger.update(model_time=model_time, evaluator_time=evaluator_time)
+
+        # update detection number
+        cat_names = [cat["name"] for cat in coco.loadCats(coco.getCatIds())]
+        for cat_name in cat_names:
+            cat_id = coco.getCatIds(catNms=cat_name)
+            cat_det_num = len(coco_evaluator.coco_eval["bbox"].cocoDt.getAnnIds(catIds=cat_id))
+            category_det_nums[cat_id[0]] += cat_det_num
+
+        # visualize
+        assert len(images) == 1
+        visualize_reppoints_boxes(
+            image=images[0],
+            output=outputs[0],
+            classes=classes,
+            dataset=dataset,
+            image_id=targets[0]["image_id"],
+            show_conf=0.5,
+        )
+        # break
+
+    # gather the stats from all processes
+    metric_logger.synchronize_between_processes()
+    logger.info(f"Averaged stats: {metric_logger}")
+    coco_evaluator.synchronize_between_processes()
+
+    # accumulate predictions from all images
+    redirect_string = io.StringIO()
+    with contextlib.redirect_stdout(redirect_string):
+        coco_evaluator.accumulate()
+        coco_evaluator.summarize()
+    logger.info(redirect_string.getvalue())
+
+    # print category-wise evaluation results
+    cat_names = [cat["name"] for cat in coco.loadCats(coco.getCatIds())]
+    table_data = [["class", "imgs", "gts", "dets", "recall", "ap"]]
+
+    # table data for show, each line has the number of image, annotations, detections and metrics
+    bbox_coco_eval = coco_evaluator.coco_eval["bbox"]
+    for cat_idx, cat_name in enumerate(cat_names):
+        cat_id = coco.getCatIds(catNms=cat_name)
+        num_img_id = len(coco.getImgIds(catIds=cat_id))
+        num_ann_id = len(coco.getAnnIds(catIds=cat_id))
+        row_data = [cat_name, num_img_id, num_ann_id, category_det_nums[cat_id[0]]]
+        row_data += [f"{bbox_coco_eval.eval['recall'][0, cat_idx, 0, 2].item():.3f}"]
+        row_data += [f"{bbox_coco_eval.eval['precision'][0, :, cat_idx, 0, 2].mean().item():.3f}"]
+        table_data.append(row_data)
+
+    # get the final line of mean results
+    cat_recall = coco_evaluator.coco_eval["bbox"].eval["recall"][0, :, 0, 2]
+    valid_cat_recall = cat_recall[cat_recall >= 0]
+    mean_recall = valid_cat_recall.sum() / max(len(valid_cat_recall), 1)
+    cat_ap = coco_evaluator.coco_eval["bbox"].eval["precision"][0, :, :, 0, 2]
+    valid_cat_ap = cat_ap[cat_ap >= 0]
+    mean_ap50 = valid_cat_ap.sum() / max(len(valid_cat_ap), 1)
+    mean_data = ["mean results", "", "", "", f"{mean_recall:.3f}", f"{mean_ap50:.3f}"]
+    table_data.append(mean_data)
+
+    # show results
+    table = AsciiTable(table_data)
+    table.inner_footing_row_border = True
+    logger.info("\n" + table.table)
+
+    metric_names = ["mAP", "AP@50", "AP@75", "AP-s", "AP-m", "AP-l"]
+    metric_names += ["AR_1", "AR_10", "AR_100", "AR-s", "AR-m", "AR-l"]
+    metric_dict = dict(zip(metric_names, coco_evaluator.coco_eval["bbox"].stats))
+    accelerator.log({f"val/{k}": v for k, v in metric_dict.items()}, step=epoch)
+    return coco_evaluator
+
+@torch.no_grad()
 def evaluate_acc(model, data_loader, epoch, accelerator=None):
     logger = logging.getLogger(os.path.basename(os.getcwd()) + "." + __name__)
     # evaluation uses single thread
@@ -178,7 +280,6 @@ def evaluate_acc(model, data_loader, epoch, accelerator=None):
     metric_dict = dict(zip(metric_names, coco_evaluator.coco_eval["bbox"].stats))
     accelerator.log({f"val/{k}": v for k, v in metric_dict.items()}, step=epoch)
     return coco_evaluator
-
 
 def get_logging_string(metric_logger, data_loader, i, epoch):
     MB = 1024 * 1024

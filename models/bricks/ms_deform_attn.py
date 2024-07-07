@@ -287,6 +287,7 @@ class MultiScaleDeformableAttention(nn.Module):
         spatial_shapes: Tensor,
         level_start_index: Tensor,
         key_padding_mask: Tensor,
+        return_sampling_location: bool = False
     ) -> Tensor:
         """Forward function of MultiScaleDeformableAttention
 
@@ -370,4 +371,7 @@ class MultiScaleDeformableAttention(nn.Module):
 
         output = self.output_proj(output)
 
-        return output
+        if not return_sampling_location:
+            return output
+        else:
+            return output, sampling_locations

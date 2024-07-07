@@ -3,10 +3,12 @@ from torch import optim
 from datasets.coco import CocoDetection
 from transforms import presets
 from optimizer import param_dict
-
+import os
 # version specific output
-branch = "main"
-version = "baseline"
+branch = os.environ.get("branch")
+version = os.environ.get("version")
+if branch is None or version is None:
+    raise ValueError("Please set branch and version in environment variables")
 dataset = "cocomini"
 backbone = "resnet18"
 device = "3090x4"
@@ -23,7 +25,7 @@ starting_epoch = 0
 max_norm = 0.1    # clip gradient norm
 
 # output_dir = None  # path to save checkpoints, default for None: checkpoints/{model_name}
-output_dir = f'outputs/{device}_{img_setting}_{branch}_{version}_salientdetr_{backbone}_bs{batch_size}x{num_gpus}_{num_epochs}ep_{dataset}'
+output_dir = f'outputs/{branch}_{version}_{device}_{img_setting}_salientdetr_{backbone}_bs{batch_size}x{num_gpus}_{num_epochs}ep_{dataset}'
 
 find_unused_parameters = False  # useful for debugging distributed training
 
