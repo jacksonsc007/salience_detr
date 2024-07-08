@@ -12,3 +12,10 @@ Following <RepPoints>, we group sampling locations to form pseu-boxes on whice b
 
 
 > TODO: 1. iterative refinement of reppoints across different decoder layers.  2. class supervison on reppoints.
+
+# v1.2
+In this version, we experiment with the likelihood of refining reppoints across different decoder layers.
+
+> TODO
+- [] sampling locations could be out of box bounds
+- [] reppoints from multiple feature maps

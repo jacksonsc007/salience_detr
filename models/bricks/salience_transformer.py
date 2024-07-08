@@ -500,6 +500,7 @@ class SalienceTransformerEncoder(nn.Module):
 class SalienceTransformerDecoderLayer(nn.Module):
     def __init__(
         self,
+        layer_idx,
         embed_dim=256,
         d_ffn=1024,
         n_heads=8,
@@ -514,7 +515,7 @@ class SalienceTransformerDecoderLayer(nn.Module):
         self.n_levels = n_levels
         self.n_points = n_points
         # cross attention
-        self.cross_attn = MultiScaleDeformableAttention(embed_dim, n_levels, n_heads, n_points)
+        self.cross_attn = MultiScaleDeformableAttention(embed_dim, n_levels, n_heads, n_points, zero_offset_init=(layer_idx != 0))
         self.dropout1 = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(embed_dim)
 
@@ -561,6 +562,8 @@ class SalienceTransformerDecoderLayer(nn.Module):
         level_start_index,
         self_attn_mask=None,
         key_padding_mask=None,
+        rep_points=None,
+        rep_boxes=None
     ):
         # self attention
         query_with_pos = key_with_pos = self.with_pos_embed(query, query_pos)
@@ -581,7 +584,9 @@ class SalienceTransformerDecoderLayer(nn.Module):
             spatial_shapes=spatial_shapes,
             level_start_index=level_start_index,
             key_padding_mask=key_padding_mask,
-            return_sampling_location=True
+            return_sampling_location=True,
+            rep_points=rep_points,
+            rep_boxes=rep_boxes
         )
         query = query + self.dropout1(query2)
         query = self.norm1(query)
@@ -593,23 +598,45 @@ class SalienceTransformerDecoderLayer(nn.Module):
 
 
 class SalienceTransformerDecoder(nn.Module):
-    def __init__(self, decoder_layer, num_layers, num_classes):
+    def __init__(self, 
+        embed_dim, 
+        n_heads, 
+        dropout,
+        activation, 
+        n_levels, 
+        n_points, 
+        d_ffn, 
+        num_layers,
+        num_classes):
         super().__init__()
         # parameters
-        self.embed_dim = decoder_layer.embed_dim
+        self.embed_dim = embed_dim
         self.num_layers = num_layers
         self.num_classes = num_classes
+        self.num_heads = n_heads
+        self.n_levels = n_levels
+        self.n_points = n_points
 
         # decoder layers and embedding
-        self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for _ in range(num_layers)])
+        self.layers = nn.ModuleList()
+        for layer_idx in range(self.num_layers):
+            self.layers.append(
+                SalienceTransformerDecoderLayer(
+                    layer_idx=layer_idx,
+                    embed_dim=embed_dim,
+                    n_heads=n_heads,
+                    dropout=dropout,
+                    activation=activation,
+                    n_levels=n_levels,
+                    n_points=n_points,
+                    d_ffn=d_ffn,
+                )
+            )
         self.ref_point_head = MLP(2 * self.embed_dim, self.embed_dim, self.embed_dim, 2)
 
         # iterative bounding box refinement
         self.class_head = nn.ModuleList([nn.Linear(self.embed_dim, num_classes) for _ in range(num_layers)])
 
-        self.num_heads = decoder_layer.num_heads
-        self.n_levels = decoder_layer.n_levels
-        self.n_points = decoder_layer.n_points
         self.num_reppoints = self.num_heads * self.n_levels * self.n_points * 2
         self.bbox_head = nn.ModuleList([MLP(self.embed_dim, self.embed_dim, self.num_reppoints, 3) for _ in range(num_layers)])
         # self.norm = nn.LayerNorm(self.embed_dim)
@@ -648,8 +675,12 @@ class SalienceTransformerDecoder(nn.Module):
         rep_points_1 = []
         rep_points_2 = []
         rep_boxes = []
+        
+        input_rep_points = None
+        input_rep_boxes = None
 
         for layer_idx, layer in enumerate(self.layers):
+            assert reference_points.shape[-1] == 4
             reference_points_input = reference_points.detach()[:, :, None] * valid_ratio_scale
             query_sine_embed = get_sine_pos_embed(reference_points_input[:, :, 0, :])
             query_pos = self.ref_point_head(query_sine_embed)
@@ -664,6 +695,8 @@ class SalienceTransformerDecoder(nn.Module):
                 level_start_index=level_start_index,
                 key_padding_mask=key_padding_mask,
                 self_attn_mask=attn_mask,
+                rep_points=input_rep_points,
+                rep_boxes=input_rep_boxes
             )
 
             # restore coordinates to real image size
@@ -695,8 +728,10 @@ class SalienceTransformerDecoder(nn.Module):
             if layer_idx == self.num_layers - 1:
                 break
 
-            # iterative bounding box refinement
             reference_points = output_coord.detach()
+            valid_ratio_scale2 = valid_ratios[:, None, None, :, None, :]
+            input_rep_points = (rep_point2 * valid_ratio_scale2).detach()
+            input_rep_boxes = (output_coord[:, :, None] * valid_ratio_scale).detach()
 
         outputs_classes = torch.stack(outputs_classes)
         outputs_coords = torch.stack(outputs_coords)

@@ -35,6 +35,7 @@ def parse_args():
     )
     parser.add_argument("--accumulate-steps", type=int, default=1, help="Steps to accumulate gradients")
     parser.add_argument("--seed", type=int, help="Random seed")
+    parser.add_argument("--debug", default=False, action="store_true")
     parser.add_argument("--use-deterministic-algorithms", action="store_true")
     dynamo_backend = ["no", "eager", "aot_eager", "inductor", "aot_ts_nvfuser", "nvprims_nvfuser"]
     dynamo_backend += ["cudagraphs", "ofi", "fx2trt", "onnxrt", "tensorrt", "ipex", "tvm"]
@@ -83,7 +84,7 @@ def train():
                 datetime.datetime.now().strftime("%Y-%m-%d-%H_%M_%S"),
             )
 
-    if os.path.exists(cfg.output_dir):
+    if not args.debug and os.path.exists(cfg.output_dir):
         raise FileExistsError(f"Output directory ({cfg.output_dir}) already exists. Please check your config file and modify output_dir to avoid overwriting existing files.")
     # Initialize accelerator
     project_config = ProjectConfiguration(

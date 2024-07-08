@@ -221,6 +221,7 @@ class MultiScaleDeformableAttention(nn.Module):
         num_heads: int = 8,
         num_points: int = 4,
         img2col_step: int = 64,
+        zero_offset_init: bool = False
     ):
         """Initialization function of MultiScaleDeformableAttention
 
@@ -251,6 +252,7 @@ class MultiScaleDeformableAttention(nn.Module):
         self.num_heads = num_heads
         self.num_levels = num_levels
         self.num_points = num_points
+        self.zero_offset_init = zero_offset_init
         # num_heads * num_points and num_levels for multi-level feature inputs
         self.sampling_offsets = nn.Linear(embed_dim, num_heads * num_levels * num_points * 2)
         self.attention_weights = nn.Linear(embed_dim, num_heads * num_levels * num_points)
@@ -261,17 +263,20 @@ class MultiScaleDeformableAttention(nn.Module):
 
     def init_weights(self):
         """Default initialization for parameters of the module"""
+        if self.zero_offset_init:
+            constant_(self.sampling_offsets.bias.data, 0.0)
+        else:
+            thetas = torch.arange(self.num_heads, dtype=torch.float32)
+            thetas = thetas * (2.0 * math.pi / self.num_heads)
+            grid_init = torch.stack([thetas.cos(), thetas.sin()], -1)
+            grid_init = grid_init / grid_init.abs().max(-1, keepdim=True)[0]
+            grid_init = grid_init.view(self.num_heads, 1, 1, 2)
+            grid_init = grid_init.repeat(1, self.num_levels, self.num_points, 1)
+            for i in range(self.num_points):
+                grid_init[:, :, i, :] *= i + 1
+            with torch.no_grad():
+                self.sampling_offsets.bias = nn.Parameter(grid_init.view(-1))
         constant_(self.sampling_offsets.weight.data, 0.0)
-        thetas = torch.arange(self.num_heads, dtype=torch.float32)
-        thetas = thetas * (2.0 * math.pi / self.num_heads)
-        grid_init = torch.stack([thetas.cos(), thetas.sin()], -1)
-        grid_init = grid_init / grid_init.abs().max(-1, keepdim=True)[0]
-        grid_init = grid_init.view(self.num_heads, 1, 1, 2)
-        grid_init = grid_init.repeat(1, self.num_levels, self.num_points, 1)
-        for i in range(self.num_points):
-            grid_init[:, :, i, :] *= i + 1
-        with torch.no_grad():
-            self.sampling_offsets.bias = nn.Parameter(grid_init.view(-1))
         constant_(self.attention_weights.weight.data, 0.0)
         constant_(self.attention_weights.bias.data, 0.0)
         xavier_uniform_(self.value_proj.weight.data)
@@ -287,7 +292,9 @@ class MultiScaleDeformableAttention(nn.Module):
         spatial_shapes: Tensor,
         level_start_index: Tensor,
         key_padding_mask: Tensor,
-        return_sampling_location: bool = False
+        return_sampling_location: bool = False,
+        rep_points: Tensor = None,
+        rep_boxes: Tensor = None,
     ) -> Tensor:
         """Forward function of MultiScaleDeformableAttention
 
@@ -332,24 +339,27 @@ class MultiScaleDeformableAttention(nn.Module):
             self.num_points,
         )
 
-        # batch_size, num_query, num_heads, num_levels, num_points, 2
-        if reference_points.shape[-1] == 2:
-            offset_normalizer = torch.stack([spatial_shapes[..., 1], spatial_shapes[..., 0]], -1)
-            sampling_locations = (
-                reference_points[:, :, None, :, None, :] +
-                sampling_offsets / offset_normalizer[None, None, None, :, None, :]
-            )
-        elif reference_points.shape[-1] == 4:
-            sampling_locations = (
-                reference_points[:, :, None, :, None, :2] +
-                sampling_offsets / self.num_points * reference_points[:, :, None, :, None, 2:] * 0.5
-            )
-        else:
-            raise ValueError(
-                "Last dim of reference_points must be 2 or 4, but get {} instead.".format(
-                    reference_points.shape[-1]
+        if rep_points is None:
+            if reference_points.shape[-1] == 2:
+                offset_normalizer = torch.stack([spatial_shapes[..., 1], spatial_shapes[..., 0]], -1)
+                sampling_locations = (
+                    reference_points[:, :, None, :, None, :] +
+                    sampling_offsets / offset_normalizer[None, None, None, :, None, :]
                 )
-            )
+            elif reference_points.shape[-1] == 4:
+                sampling_locations = (
+                    reference_points[:, :, None, :, None, :2] +
+                    sampling_offsets / self.num_points * reference_points[:, :, None, :, None, 2:] * 0.5
+                )
+            else:
+                raise ValueError(
+                    "Last dim of reference_points must be 2 or 4, but get {} instead.".format(
+                        reference_points.shape[-1]
+                    )
+                )
+        else:
+            assert rep_points.ndim == 6
+            sampling_locations = rep_points + sampling_offsets * rep_boxes[:, :, None, :, None, 2:]
 
         # the original impl for fp32 training
         if torch.cuda.is_available() and value.is_cuda:
