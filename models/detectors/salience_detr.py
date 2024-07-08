@@ -245,9 +245,9 @@ class SalienceDETR(DNDETRDetector):
             outputs_class, outputs_coord, rep_points_1, rep_points_2, rep_boxes = self.dn_post_process(outputs_class, outputs_coord, rep_points_1, rep_points_2, rep_boxes, dn_metas)
 
             # prepare for loss computation
-        output = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord[-1], 'rep_boxes': rep_boxes[-1], 'rep_points_1': rep_points_1[-1], 'rep_points_2': rep_points_2[-1]}
+        output = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord[-1], 'rep_points_1': rep_points_1[-1], 'rep_points_2': rep_points_2[-1]}
         if self.aux_loss:
-            output["aux_outputs"] = self._set_aux_loss(outputs_class, outputs_coord, rep_boxes)
+            output["aux_outputs"] = self._set_aux_loss(outputs_class, outputs_coord)
 
         # prepare two stage output
         output["enc_outputs"] = {"pred_logits": enc_class, "pred_boxes": enc_coord}
