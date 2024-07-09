@@ -140,8 +140,8 @@ def plot_boxes_reppoints(
         cv2.rectangle(image, (box[0], box[1]), (box[2], box[3]), color=color, thickness=2)
         for r1, r2 in zip(rep1, rep2):
             # cv2.circle(image, (int(r[0]), int(r[1])), 2, color=color, thickness=-1)
-            cv2.circle(image, (int(r1[0]), int(r1[1])), 2, color=(255, 0, 0), thickness=-1)
-            cv2.circle(image, (int(r2[0]), int(r2[1])), 2, color=(0, 255, 0), thickness=-1)
+            cv2.circle(image, (int(r1[0]), int(r1[1])), 4, color=(0, 255, 0), thickness=-1)
+            cv2.circle(image, (int(r2[0]), int(r2[1])), 4, color=(255, 255, 255), thickness=1)
 
     # image = cv2.addWeighted(original_image, 1 - fill_alpha, image, fill_alpha, 0)
 

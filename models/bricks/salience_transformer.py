@@ -8,7 +8,7 @@ from torch import nn
 
 from models.bricks.base_transformer import TwostageTransformer
 from models.bricks.basic import MLP
-from models.bricks.ms_deform_attn import MultiScaleDeformableAttention
+from models.bricks.ms_deform_attn import MultiScaleDeformableAttention, DecoderMultiScaleDeformableAttention
 from models.bricks.position_encoding import PositionEmbeddingLearned, get_sine_pos_embed
 from util.misc import inverse_sigmoid
 from models.bricks.misc import points2box
@@ -514,7 +514,7 @@ class SalienceTransformerDecoderLayer(nn.Module):
         self.n_levels = n_levels
         self.n_points = n_points
         # cross attention
-        self.cross_attn = MultiScaleDeformableAttention(embed_dim, n_levels, n_heads, n_points)
+        self.cross_attn = DecoderMultiScaleDeformableAttention(embed_dim, n_levels, n_heads, n_points)
         self.dropout1 = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(embed_dim)
 
@@ -561,6 +561,7 @@ class SalienceTransformerDecoderLayer(nn.Module):
         level_start_index,
         self_attn_mask=None,
         key_padding_mask=None,
+        valid_ratios=None
     ):
         # self attention
         query_with_pos = key_with_pos = self.with_pos_embed(query, query_pos)
@@ -581,7 +582,8 @@ class SalienceTransformerDecoderLayer(nn.Module):
             spatial_shapes=spatial_shapes,
             level_start_index=level_start_index,
             key_padding_mask=key_padding_mask,
-            return_sampling_location=True
+            valid_ratios=valid_ratios,
+            return_sampling_location=True,
         )
         query = query + self.dropout1(query2)
         query = self.norm1(query)
@@ -608,9 +610,9 @@ class SalienceTransformerDecoder(nn.Module):
         self.class_head = nn.ModuleList([nn.Linear(self.embed_dim, num_classes) for _ in range(num_layers)])
 
         self.num_heads = decoder_layer.num_heads
-        self.n_levels = decoder_layer.n_levels
+        # self.n_levels = decoder_layer.n_levels
         self.n_points = decoder_layer.n_points
-        self.num_reppoints = self.num_heads * self.n_levels * self.n_points * 2
+        self.num_reppoints = self.num_heads *  self.n_points * 2
         self.bbox_head = nn.ModuleList([MLP(self.embed_dim, self.embed_dim, self.num_reppoints, 3) for _ in range(num_layers)])
         # self.norm = nn.LayerNorm(self.embed_dim)
 
@@ -650,9 +652,12 @@ class SalienceTransformerDecoder(nn.Module):
         rep_boxes = []
 
         for layer_idx, layer in enumerate(self.layers):
-            reference_points_input = reference_points.detach()[:, :, None] * valid_ratio_scale
-            query_sine_embed = get_sine_pos_embed(reference_points_input[:, :, 0, :])
+            padded_reference_points = reference_points.detach()[:, :, None] * valid_ratio_scale
+            query_sine_embed = get_sine_pos_embed(padded_reference_points[:, :, 0, :])
             query_pos = self.ref_point_head(query_sine_embed)
+
+            # delay the coordinate transform later
+            reference_points_input = reference_points.detach()
 
             # relation embedding
             query, rep_point1 = layer(
@@ -664,10 +669,14 @@ class SalienceTransformerDecoder(nn.Module):
                 level_start_index=level_start_index,
                 key_padding_mask=key_padding_mask,
                 self_attn_mask=attn_mask,
+                valid_ratios=valid_ratios
             )
 
-            # restore coordinates to real image size
-            rep_point1 = rep_point1 / valid_ratios[:, None, None, :, None, :]
+            # rep points are same among all feature levels
+            assert torch.equal(*rep_point1.split(2, dim=3), )
+            
+            # as rep_points are same for all feature map level
+            rep_point1 = rep_point1[:, :, :, 0:1]
             rep_points_1.append(rep_point1)
             
             # rep_points: (bs, num_queries, n_heads, n_lvls, n_points, 2)
@@ -682,7 +691,8 @@ class SalienceTransformerDecoder(nn.Module):
             tmp = self.bbox_head[layer_idx](query)
             tmp = tmp.reshape_as(rep_point1)
 
-            rep_point2 = tmp * (rep_box1[..., 2:][:, :, None, None, None, :]).detach() + rep_point1.detach()
+            rep_point2 = tmp + inverse_sigmoid(rep_point1)
+            rep_point2 = rep_point2.sigmoid()
             rep_points_2.append(rep_point2)
             output_coord = points2box(rep_point2)
 

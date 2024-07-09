@@ -10,6 +10,7 @@ from torch.autograd.function import once_differentiable
 from torch.nn import functional as F
 from torch.nn.init import constant_, xavier_uniform_
 from torch.utils.cpp_extension import load
+from models.bricks.basic import MLP
 
 if torch.cuda.is_available():
     _C = load(
@@ -207,6 +208,182 @@ def multi_scale_deformable_attn_pytorch(
     output = output.view(bs, num_heads * embed_dims, num_queries)
     return output.transpose(1, 2).contiguous()
 
+
+class DecoderMultiScaleDeformableAttention(nn.Module):
+    """Multi-Scale Deformable Attention Module used in Deformable-DETR
+
+    `Deformable DETR: Deformable Transformers for End-to-End Object Detection.
+    <https://arxiv.org/pdf/2010.04159.pdf>`_.
+    """
+    def __init__(
+        self,
+        embed_dim: int = 256,
+        num_levels: int = 4,
+        num_heads: int = 8,
+        num_points: int = 4,
+        img2col_step: int = 64,
+    ):
+        """Initialization function of MultiScaleDeformableAttention
+
+        :param embed_dim: The embedding dimension of Attention, defaults to 256
+        :param num_levels: The number of feature map used in Attention, defaults to 4
+        :param num_heads: The number of attention heads, defaults to 8
+        :param num_points: The number of sampling points for each query
+            in each head, defaults to 4
+        :param img2col_step: The step used in image_to_column, defaults to 64
+        """
+        super().__init__()
+        if embed_dim % num_heads != 0:
+            raise ValueError(
+                "embed_dim must be divisible by num_heads, but got {} and {}".format(embed_dim, num_heads)
+            )
+        head_dim = embed_dim // num_heads
+
+        if not _is_power_of_2(head_dim):
+            warnings.warn(
+                """
+                You'd better set embed_dim in MSDeformAttn to make sure that
+                each dim of the attention head a power of 2, which is more efficient.
+                """
+            )
+
+        self.im2col_step = img2col_step
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.num_levels = num_levels
+        self.num_points = num_points
+        # assert value
+        assert self.num_heads == 8
+        assert self.num_points == 1
+
+        # num_heads * num_points and num_levels for multi-level feature inputs
+        self.sampling_offsets = MLP(embed_dim, embed_dim, num_heads * num_points * 2, 3)
+        self.attention_weights = nn.Linear(embed_dim, num_levels)
+        self.value_proj = nn.Linear(embed_dim, embed_dim)
+        self.output_proj = nn.Linear(embed_dim, embed_dim)
+
+        self.init_weights()
+
+    def init_weights(self):
+        """Default initialization for parameters of the module"""
+        constant_(self.sampling_offsets.layers[-1].weight.data, 0.0)
+        constant_(self.sampling_offsets.layers[-1].bias.data, 0.0)
+        # thetas = torch.arange(self.num_heads, dtype=torch.float32)
+        # thetas = thetas * (2.0 * math.pi / self.num_heads)
+        # grid_init = torch.stack([thetas.cos(), thetas.sin()], -1)
+        # grid_init = grid_init / grid_init.abs().max(-1, keepdim=True)[0]
+        # grid_init = grid_init.view(self.num_heads, 1, 1, 2)
+        # grid_init = grid_init.repeat(1, self.num_levels, self.num_points, 1)
+        # for i in range(self.num_points):
+        #     grid_init[:, :, i, :] *= i + 1
+        # with torch.no_grad():
+        #     self.sampling_offsets.bias = nn.Parameter(grid_init.view(-1))
+        constant_(self.attention_weights.weight.data, 0.0)
+        constant_(self.attention_weights.bias.data, 0.0)
+        xavier_uniform_(self.value_proj.weight.data)
+        constant_(self.value_proj.bias.data, 0.0)
+        xavier_uniform_(self.output_proj.weight.data)
+        constant_(self.output_proj.bias.data, 0.0)
+
+    def forward(
+        self,
+        query: Tensor,
+        reference_points: Tensor,
+        value: Tensor,
+        spatial_shapes: Tensor,
+        level_start_index: Tensor,
+        key_padding_mask: Tensor,
+        valid_ratios: Tensor,
+        return_sampling_location: bool = False,
+    ) -> Tensor:
+        """Forward function of MultiScaleDeformableAttention
+
+        :param query: query embeddings with shape (batch_size, num_query, embed_dim)
+        :param reference_points: the normalized reference points with shape
+            (batch_size, num_query, num_levels, 2), all_elements is range in [0, 1],
+            top-left (0, 0), bottom-right (1, 1), including padding area. or
+            (batch_size, num_query, num_levels, 4), add additional two dimensions (h, w)
+            to form reference boxes
+        :param value: value embeddings with shape (batch_size, num_value, embed_dim)
+        :param spatial_shapes: spatial shapes of features in different levels.
+            with shape (num_levels, 2), last dimension represents (h, w)
+        :param level_start_index: the start index of each level. A tensor with shape
+            (num_levels,), which can be represented as [0, h_0 * w_0, h_0 * w_0 + h_1 * w_1, ...]
+        :param key_padding_mask: ByteTensor for query, with shape (batch_size, num_value)
+        :return: forward results with shape (batch_size, num_query, embed_dim)
+        """
+        batch_size, num_query, _ = query.shape
+        batch_size, num_value, _ = value.shape
+        assert (spatial_shapes[:, 0] * spatial_shapes[:, 1]).sum() == num_value
+
+        # value projection
+        value = self.value_proj(value)
+        # fill "0" for the padding part
+        if key_padding_mask is not None:
+            value = value.masked_fill(key_padding_mask[..., None], float(0))
+
+        value = value.view(batch_size, num_value, self.num_heads, self.embed_dim // self.num_heads)
+        sampling_offsets = self.sampling_offsets(query).view(
+            batch_size, num_query, self.num_heads, self.num_points, 2
+        )
+        # total num_levels * num_points features
+        attention_weights = self.attention_weights(query)
+        attention_weights = attention_weights.softmax(-1)
+        attention_weights = attention_weights.view(
+            batch_size,
+            num_query,
+            1,
+            self.num_levels,
+            1,
+        ).repeat(1, 1, self.num_heads, 1, self.num_points)
+
+        # batch_size, num_query, num_heads, num_levels, num_points, 2
+        if reference_points.shape[-1] == 2:
+            raise ValueError("unexpected")
+            offset_normalizer = torch.stack([spatial_shapes[..., 1], spatial_shapes[..., 0]], -1)
+            sampling_locations = (
+                reference_points[:, :, None, :, None, :] +
+                sampling_offsets / offset_normalizer[None, None, None, :, None, :]
+            )
+        elif reference_points.shape[-1] == 4:
+            sampling_locations = (
+                reference_points[:, :, None, None, :2] +
+                sampling_offsets.tanh()  * reference_points[:, :, None, None, 2:] 
+            )
+        else:
+            raise ValueError(
+                "Last dim of reference_points must be 2 or 4, but get {} instead.".format(
+                    reference_points.shape[-1]
+                )
+            )
+        sampling_locations = sampling_locations[:, :, :, None].repeat(1, 1, 1, self.num_levels, 1, 1)
+        rep_points = sampling_locations
+
+        sampling_locations = sampling_locations * valid_ratios[:, None, None, :, None, :]
+        # the original impl for fp32 training
+        if torch.cuda.is_available() and value.is_cuda:
+            output = MultiScaleDeformableAttnFunction.apply(
+                value.to(torch.float32),
+                spatial_shapes,
+                level_start_index,
+                sampling_locations,
+                attention_weights,
+                self.im2col_step,
+            )
+        else:
+            output = multi_scale_deformable_attn_pytorch(
+                value, spatial_shapes, sampling_locations, attention_weights
+            )
+
+        if value.dtype != torch.float32:
+            output = output.to(value.dtype)
+
+        output = self.output_proj(output)
+
+        if not return_sampling_location:
+            return output
+        else:
+            return output, rep_points
 
 class MultiScaleDeformableAttention(nn.Module):
     """Multi-Scale Deformable Attention Module used in Deformable-DETR

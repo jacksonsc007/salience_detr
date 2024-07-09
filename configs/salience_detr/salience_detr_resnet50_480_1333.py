@@ -68,7 +68,7 @@ transformer = SalienceTransformer(
             dropout=0.0,
             activation=nn.ReLU(inplace=True),
             n_levels=num_feature_levels,
-            n_points=4,
+            n_points=1,
             d_ffn=dim_feedforward,
         ),
         num_layers=transformer_dec_layers,

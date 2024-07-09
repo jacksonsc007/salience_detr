@@ -160,6 +160,8 @@ def train():
 
     # save dataset name, useful for inference
     if accelerator.is_main_process:
+        # cp source code to output dir
+        os.system(f'cp -r models/ {cfg.output_dir}')
         label_file = os.path.join(cfg.output_dir, "label_names.txt")
         with open(label_file, "w") as f:
             caid_name = [f"{k} {v['name']}" for k, v in cfg.train_dataset.coco.cats.items()]
